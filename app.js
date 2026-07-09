@@ -148,7 +148,7 @@ async function fetchJSON(url, ms){
 
 async function getLocation(){
   return new Promise((res)=>{
-    if (!navigator.geolocation) return res(null);
+    if (!navigator.geolocation || /[?&]nogps/.test(location.search)) return res(null);
     navigator.geolocation.getCurrentPosition(
       p => res({lat:p.coords.latitude, lng:p.coords.longitude}),
       () => res(null),
@@ -255,13 +255,12 @@ function render(){
   app.style.setProperty('--navidle', S.theme==='night' ? '#6E867C' : '#A6AEA4');
 
   const c = $('#content');
-  if (S.tab==='mapa'){ renderMapa(c); } else {
-    if (mapObj){ mapObj.remove(); mapObj=null; }
-    if (S.tab==='lista') renderLista(c);
-    else if (S.tab==='ruta') renderRuta(c);
-    else if (S.tab==='favoritos') renderFav(c);
-    else if (S.tab==='ahorro') renderAhorro(c);
-  }
+  if (mapObj){ mapObj.remove(); mapObj=null; }
+  if (S.tab==='mapa') renderMapa(c);
+  else if (S.tab==='lista') renderLista(c);
+  else if (S.tab==='ruta') renderRuta(c);
+  else if (S.tab==='favoritos') renderFav(c);
+  else if (S.tab==='ahorro') renderAhorro(c);
   renderNav();
   renderLayer();
 }
@@ -440,9 +439,11 @@ function renderRuta(c){
         <span style="font-size:12.5px;color:var(--muted)">${esc(r.km)}</span>
         <span style="font-size:12.5px;color:var(--muted)">${esc(r.time)}</span></div>`:''}
     </button>
+    ${r&&r.coords?`<div id="routeMap" style="height:210px;border-radius:18px;overflow:hidden;margin-bottom:14px;border:1px solid var(--line);position:relative;z-index:0"></div>`:''}
     <div id="routeBody"></div>
   </div>`;
 
+  if (r&&r.coords) buildRouteMap(r);
   const body = c.querySelector('#routeBody');
   if (!r){
     body.innerHTML = `<div class="empty"><div class="circle"><svg width="30" height="30" viewBox="0 0 24 24" fill="none"><path d="M6 20a3 3 0 0 1 0-6h9a3 3 0 0 0 0-6H6" stroke="var(--mintInk)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6" cy="6" r="2.2" fill="var(--mintInk)"/><circle cx="18" cy="20" r="2.2" fill="var(--mintInk)"/></svg></div><div class="t">Planifica tu ruta</div><div class="s">Indica origen y destino y te diré dónde repostar más barato a lo largo del camino.</div></div>`;
@@ -486,6 +487,31 @@ function renderRuta(c){
   });
 }
 
+function buildRouteMap(r){
+  setTimeout(()=>{
+    if (typeof L==='undefined' || S.tab!=='ruta' || !document.getElementById('routeMap')) return;
+    const rm = L.map('routeMap', {zoomControl:false, attributionControl:false});
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19}).addTo(rm);
+    L.control.attribution({prefix:false, position:'bottomright'}).addAttribution('© OSM').addTo(rm);
+    const line = L.polyline(r.coords, {color:'#224E40', weight:5, opacity:0.9}).addTo(rm);
+    L.polyline(r.coords, {color:'#fff', weight:1.5, opacity:0.5}).addTo(rm);
+    // origen (azul) y destino (terracota)
+    if (r.o) L.marker([r.o.lat,r.o.lng], {icon:L.divIcon({className:'', html:`<div style="width:16px;height:16px;border-radius:50%;background:#2A6FDB;border:3px solid #fff;box-shadow:0 2px 6px rgba(0,0,0,0.3)"></div>`, iconSize:[16,16], iconAnchor:[8,8]})}).addTo(rm);
+    if (r.d) L.marker([r.d.lat,r.d.lng], {icon:L.divIcon({className:'', html:`<svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="M12 23s8-7.2 8-13a8 8 0 1 0-16 0c0 5.8 8 13 8 13Z" fill="#B4541F" stroke="#fff" stroke-width="1.5"/></svg>`, iconSize:[24,24], iconAnchor:[12,23]})}).addTo(rm);
+    // gasolineras
+    const rMin = r.stops.length ? Math.min(...r.stops.map(s=>s.price)) : NaN;
+    r.stops.forEach(s=>{
+      if (isNaN(s.lat)||isNaN(s.lng)) return;
+      const cheap = s.price===rMin;
+      const icon = L.divIcon({ className:'', html:`<div class="map-pin ${cheap?'cheap':''}" style="font-size:${cheap?13:11}px;padding:3px 7px">${fmtP(s.price)}<span class="l">€</span></div>`, iconSize:[48,22], iconAnchor:[24,26] });
+      L.marker([s.lat,s.lng], {icon, zIndexOffset: cheap?1000:0}).addTo(rm).on('click', ()=>{ S.detail=s.id; renderLayer(); });
+    });
+    rm.fitBounds(line.getBounds(), {padding:[28,28]});
+    mapObj = rm;
+    setTimeout(()=>rm.invalidateSize(), 80);
+  }, 30);
+}
+
 async function planRoute(originText, destText){
   toast('Calculando ruta…');
   try {
@@ -518,7 +544,7 @@ async function planRoute(originText, destText){
     near.sort((a,b)=>a._atKm-b._atKm);
     // quedarnos con las mejores por tramos, máx ~6
     const stops = pickRouteStops(near);
-    S.route = { origin:o.name, dest:d.name, road:'Por carretera', km:km+' km', time, coords, stops };
+    S.route = { origin:o.name, dest:d.name, o, d, road:'Por carretera', km:km+' km', time, coords, stops };
     save(); render();
     toast(stops.length? 'Ruta lista': 'Ruta trazada (sin gasolineras con datos)');
   } catch(e){ toast('Error planificando la ruta'); }
@@ -537,6 +563,7 @@ function pickRouteStops(near){
   }
   return chosen.map(st=>({
     id:st.id, brand:prettyName(st.rotulo), brandKey:st.brandKey, place:st.addr.split(',')[0]||'Estación',
+    lat:st.lat, lng:st.lng,
     km:st._atKm, price:st.prices.diesel, onHwy:st._detour<1.2,
     detour: st._detour<1.2 ? '0 min' : '+'+Math.max(1,Math.round(st._detour*1.5))+' min',
   }));
