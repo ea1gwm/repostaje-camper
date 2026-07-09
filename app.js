@@ -56,7 +56,7 @@ function prettyName(rotulo){
 // ---------- Estado ----------
 let S = {
   tab:'lista', detail:null, fuel:'diesel', brands:[], theme:'day', accent:ACCENTS[0],
-  tank:70, routeSheet:false, exportSheet:false, zoneSheet:false,
+  tank:70, maxDetour:2, routeSheet:false, exportSheet:false, zoneSheet:false,
   favorites:[], visits:{}, camper:{}, history:{},
   route:null, // {origin, dest, road, km, time, stops:[]}
 };
@@ -65,7 +65,7 @@ let mapObj = null, mapMarkers = [];
 
 function save(){
   try { localStorage.setItem(STORE, JSON.stringify({
-    theme:S.theme, accent:S.accent, tank:S.tank, fuel:S.fuel,
+    theme:S.theme, accent:S.accent, tank:S.tank, fuel:S.fuel, maxDetour:S.maxDetour,
     favorites:S.favorites, visits:S.visits, camper:S.camper, history:S.history,
     cache:{ stations:DATA.stations, updated:DATA.updated, source:DATA.source, user:DATA.user, province:DATA.province },
   })); } catch(e){}
@@ -74,7 +74,7 @@ function load(){
   try {
     const s = JSON.parse(localStorage.getItem(STORE) || '{}');
     S.theme = s.theme || 'day'; S.accent = s.accent || ACCENTS[0]; S.tank = s.tank || 70;
-    S.fuel = s.fuel || 'diesel';
+    S.fuel = s.fuel || 'diesel'; S.maxDetour = (s.maxDetour==null?2:s.maxDetour);
     S.favorites = s.favorites || []; S.visits = s.visits || {}; S.camper = s.camper || {}; S.history = s.history || {};
     if (s.cache && s.cache.stations) {
       DATA.stations = s.cache.stations; DATA.updated = s.cache.updated || 0;
@@ -439,7 +439,13 @@ function renderRuta(c){
         <span style="font-size:12.5px;color:var(--muted)">${esc(r.km)}</span>
         <span style="font-size:12.5px;color:var(--muted)">${esc(r.time)}</span></div>`:''}
     </button>
-    ${r&&r.coords?`<div id="routeMap" style="height:210px;border-radius:18px;overflow:hidden;margin-bottom:14px;border:1px solid var(--line);position:relative;z-index:0"></div>`:''}
+    ${r&&r.coords?`<div id="routeMap" style="height:210px;border-radius:18px;overflow:hidden;margin-bottom:12px;border:1px solid var(--line);position:relative;z-index:0"></div>`:''}
+    ${r?`<div style="margin-bottom:14px">
+      <div style="font-size:12.5px;font-weight:700;color:var(--soft);margin-bottom:8px">Desvío máx. para repostar</div>
+      <div class="chips scr" style="margin:0 -18px 0;padding:2px 18px">
+        ${[0,1,2,3,5].map(v=>`<button class="chip ${S.maxDetour===v?'on':''}" data-detour="${v}">${v===0?'Sin salir de la vía':v+' km'}</button>`).join('')}
+      </div>
+    </div>`:''}
     <div id="routeBody"></div>
   </div>`;
 
@@ -450,7 +456,10 @@ function renderRuta(c){
     return;
   }
   if (!r.stops || !r.stops.length){
-    body.innerHTML = `<div class="banner"><span>No se han encontrado gasolineras con datos a lo largo de esta ruta.</span></div>`;
+    const hint = (r.cand && r.cand.length && S.maxDetour===0)
+      ? 'No hay gasolineras justo en la vía. Sube el desvío máximo para incluir alguna cercana.'
+      : 'No se han encontrado gasolineras con datos a lo largo de esta ruta.';
+    body.innerHTML = `<div class="banner"><span>${hint}</span></div>`;
     return;
   }
   const rMin = Math.min(...r.stops.map(s=>s.price));
@@ -460,7 +469,7 @@ function renderRuta(c){
       <div class="ic">${pumpIcon('#17140E')}</div>
       <div style="flex:1">
         <div style="font-size:14.5px;font-weight:700;color:#fff;line-height:1.3">Reposta en ${esc(reco.brand)} · km ${reco.km}</div>
-        <div style="font-size:13px;color:#B9C7BE;margin-top:3px;line-height:1.4">La más barata de tu ruta a ${fmtP(reco.price)} €/L. ${reco.onHwy?'Está casi en tu trazado, sin apenas desvío.':'Solo te desvías '+reco.detour+'.'}</div>
+        <div style="font-size:13px;color:#B9C7BE;margin-top:3px;line-height:1.4">La más barata de tu ruta a ${fmtP(reco.price)} €/L. ${reco.onHwy?'Está en tu propia vía, sin desvío.':'Te desvías solo '+fmtKm(reco.detourKm)+' km.'}</div>
       </div>
     </div>
     <div style="font-size:13px;font-weight:700;color:var(--soft);margin-bottom:12px">Gasolineras en tu ruta</div>
@@ -476,7 +485,7 @@ function renderRuta(c){
           <div style="font-size:12.5px;color:var(--muted);margin:1px 0 7px">${esc(s.place)}</div>
           <span class="exit" style="background:${s.onHwy?'var(--mint)':'#FBEED6'};color:${s.onHwy?'#2E7D5B':'#B4541F'}">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M5 12h14m0 0-5-5m5 5-5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-            ${s.onHwy?'En ruta · '+s.detour:'Desvío '+s.detour}</span>
+            ${s.onHwy?'En tu vía · sin desvío':'Desvío '+fmtKm(s.detourKm)+' km'}</span>
         </div>
         <div style="display:flex;flex-direction:column;align-items:flex-end;flex-shrink:0">
           <div class="pv"><span class="n" style="font-size:20px">${fmtP(s.price)}</span><span class="l">€/L</span></div>
@@ -528,44 +537,44 @@ async function planRoute(originText, destText){
     // estaciones a lo largo del corredor (usa dataset nacional, cacheado)
     toast('Buscando gasolineras…');
     const all = await nationalStations();
-    const corridor = 4; // km
+    const corridor = 12; // km máx. que consideramos como candidatas; luego se filtra por el desvío del usuario
     const sampled = coords.filter((_,i)=> i % Math.max(1, Math.floor(coords.length/300)) === 0);
-    const near = [];
+    const cand = [];
     for (const st of all){
       if (isNaN(st.prices.diesel)) continue;
-      let best = Infinity, atKm = 0;
+      let best = Infinity, at = 0;
       for (let i=0;i<sampled.length;i++){
         const dd = haversine(st.lat,st.lng,sampled[i][0],sampled[i][1]);
-        if (dd<best){ best=dd; atKm = Math.round(km * i/sampled.length); }
-        if (best<0.6) break;
+        if (dd<best){ best=dd; at = i; }
+        if (best<0.5) break;
       }
-      if (best<=corridor){ st._detour=best; st._atKm=atKm; near.push(st); }
+      if (best<=corridor){ cand.push({ id:st.id, rotulo:st.rotulo, brandKey:st.brandKey, addr:st.addr, lat:st.lat, lng:st.lng, diesel:st.prices.diesel, atKm:Math.round(km*at/sampled.length), detour:best }); }
     }
-    near.sort((a,b)=>a._atKm-b._atKm);
-    // quedarnos con las mejores por tramos, máx ~6
-    const stops = pickRouteStops(near);
-    S.route = { origin:o.name, dest:d.name, o, d, road:'Por carretera', km:km+' km', time, coords, stops };
+    cand.sort((a,b)=>a.atKm-b.atKm);
+    S.route = { origin:o.name, dest:d.name, o, d, road:'Por carretera', km:km+' km', time, coords, cand, stops: deriveStops(cand, S.maxDetour) };
     save(); render();
     toast(stops.length? 'Ruta lista': 'Ruta trazada (sin gasolineras con datos)');
   } catch(e){ toast('Error planificando la ruta'); }
 }
 
-function pickRouteStops(near){
+const ON_ROUTE = 0.7; // km: por debajo de esto la estación está "en la propia vía"
+function deriveStops(cand, maxDetour){
+  if (!cand || !cand.length) return [];
+  const thr = Math.max(maxDetour||0, ON_ROUTE);
+  const near = cand.filter(c=>c.detour<=thr).sort((a,b)=>a.atKm-b.atKm);
   if (!near.length) return [];
-  const segs = 6; const maxKm = near[near.length-1]._atKm || 1;
+  const segs = 6; const maxKm = near[near.length-1].atKm || 1;
   const chosen = [];
   for (let s=0;s<segs;s++){
     const lo = maxKm*s/segs, hi = maxKm*(s+1)/segs;
-    const inSeg = near.filter(n=>n._atKm>=lo && n._atKm<hi);
+    const inSeg = near.filter(n=>n.atKm>=lo && n.atKm<hi);
     if (!inSeg.length) continue;
-    const best = inSeg.sort((a,b)=>a.prices.diesel-b.prices.diesel)[0];
-    chosen.push(best);
+    chosen.push(inSeg.slice().sort((a,b)=>a.diesel-b.diesel)[0]);
   }
-  return chosen.map(st=>({
-    id:st.id, brand:prettyName(st.rotulo), brandKey:st.brandKey, place:st.addr.split(',')[0]||'Estación',
-    lat:st.lat, lng:st.lng,
-    km:st._atKm, price:st.prices.diesel, onHwy:st._detour<1.2,
-    detour: st._detour<1.2 ? '0 min' : '+'+Math.max(1,Math.round(st._detour*1.5))+' min',
+  return chosen.map(c=>({
+    id:c.id, brand:prettyName(c.rotulo), brandKey:c.brandKey, place:(c.addr.split(',')[0]||'Estación'),
+    lat:c.lat, lng:c.lng, km:c.atKm, price:c.diesel,
+    onHwy: c.detour<=ON_ROUTE, detourKm:c.detour,
   }));
 }
 
@@ -889,7 +898,7 @@ function shareStation(id){
 
 // ---------- Eventos ----------
 document.addEventListener('click', async (ev)=>{
-  const t = ev.target.closest('[data-tab],[data-open],[data-brand],[data-fuel],[data-act],[data-fav],[data-unfav],[data-addvisit],[data-camper],[data-go],[data-share],[data-close],[data-stop]');
+  const t = ev.target.closest('[data-tab],[data-open],[data-brand],[data-fuel],[data-detour],[data-act],[data-fav],[data-unfav],[data-addvisit],[data-camper],[data-go],[data-share],[data-close],[data-stop]');
   if (!t) return;
 
   if (t.dataset.stop!==undefined){ ev.stopPropagation(); return; }
@@ -903,6 +912,7 @@ document.addEventListener('click', async (ev)=>{
     if (k==='todas') S.brands=[]; else { const i=S.brands.indexOf(k); if(i>=0) S.brands.splice(i,1); else S.brands.push(k); }
     render(); return;
   }
+  if (t.dataset.detour!==undefined){ S.maxDetour=+t.dataset.detour; if (S.route&&S.route.cand) S.route.stops=deriveStops(S.route.cand,S.maxDetour); save(); render(); return; }
   if (t.dataset.fav){ toggleFav(t.dataset.fav); return; }
   if (t.dataset.unfav){ toggleFav(t.dataset.unfav); return; }
   if (t.dataset.addvisit){ addVisit(t.dataset.addvisit); return; }
